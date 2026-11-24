@@ -514,8 +514,8 @@ const CONTESTS = {
   krathong: {
     title: 'ประกวดแข่งขันกระทง',
     rounds: {
-      lower: { label: 'ระดับ ม.ต้น', full: 'ระดับ ม.ต้น', total: 120, level: 'lower', groups: [{ name: 'เกณฑ์การให้คะแนน (120)', items: KT_ITEMS() }] },
-      upper: { label: 'ระดับ ม.ปลาย', full: 'ระดับ ม.ปลาย', total: 120, level: 'upper', groups: [{ name: 'เกณฑ์การให้คะแนน (120)', items: KT_ITEMS() }] }
+      lower: { label: 'ระดับ ม.ต้น', full: 'ระดับ ม.ต้น', total: 120, level: 'lower', totalOnly: true, groups: [{ name: 'เกณฑ์การให้คะแนน (120)', items: KT_ITEMS() }] },
+      upper: { label: 'ระดับ ม.ปลาย', full: 'ระดับ ม.ปลาย', total: 120, level: 'upper', totalOnly: true, groups: [{ name: 'เกณฑ์การให้คะแนน (120)', items: KT_ITEMS() }] }
     }
   }
 };
@@ -581,29 +581,41 @@ const Local = {
   pub(s, admin){ const o = { contestants: s.contestants, judges: s.judgesFull.map(j=>({id:j.id,name:j.name,contest:j.contest})), scores: s.scores }; if (admin) o.judgesFull = s.judgesFull; return o; },
   call(b){
     const s = this.load(); const admin = b.user === ADMIN_USER && String(b.pass) === ADMIN_PASS; let extra = {};
-    const judge = () => s.judgesFull.find(j => j.id === b.judgeId && String(j.pin) === String(b.pin));
+    const judge = () => s.judgesFull.find(j => j.id === b.judgeId); // เลือกชื่อ ไม่ใช้ PIN
     switch (b.action) {
       case 'getAll': break;
-      case 'judgeLogin': { const j = judge(); if (!j) throw new Error('รหัสกรรมการไม่ถูกต้อง'); extra.judge = {id:j.id,name:j.name,contest:j.contest}; break; }
-      case 'saveScore': {
-        const j = judge(); if (!j) throw new Error('รหัสกรรมการไม่ถูกต้อง');
+      case 'judgeLogin': { const j = judge(); if (!j) throw new Error('ไม่พบชื่อกรรมการ'); extra.judge = {id:j.id,name:j.name,contest:j.contest}; break; }
+      case 'saveScore': case 'saveTotals': {
+        const j = judge(); if (!j) throw new Error('ไม่พบชื่อกรรมการ');
         if (j.contest !== b.contest) throw new Error('กรรมการท่านนี้ไม่มีสิทธิ์ให้คะแนนรายการนี้');
-        const maxes = itemsOf(b.contest, b.round).map(x=>x[1]);
-        const sc = maxes.map((m,i)=>Math.max(0,Math.min(m, Number(b.scores[i])||0)));
-        const key = [b.contest,b.round,b.contestantId,j.id].join('|');
-        const rec = {key,contest:b.contest,round:b.round,contestantId:b.contestantId,judgeId:j.id,s:sc,total:sc.reduce((a,v)=>a+v,0),updatedAt:new Date().toISOString()};
-        const i = s.scores.findIndex(x=>x.key===key); if (i>=0) s.scores[i]=rec; else s.scores.push(rec);
+        const maxes = itemsOf(b.contest, b.round).map(x=>x[1]), full = CONTESTS[b.contest].rounds[b.round].total;
+        const entries = b.action === 'saveTotals' ? (b.entries||[]) : [{ contestantId:b.contestantId, scores:b.scores, total:b.total }];
+        entries.forEach(en => {
+          let sc, total;
+          if (b.contest === 'krathong' || en.scores == null){ if (en.total === '' || en.total == null || isNaN(+en.total)) return; total = Math.max(0, Math.min(full, Math.round(+en.total*100)/100)); sc = maxes.map(()=>null); }
+          else { sc = maxes.map((m,i)=>Math.max(0,Math.min(m, Number(en.scores[i])||0))); total = sc.reduce((a,v)=>a+v,0); }
+          const key = [b.contest,b.round,en.contestantId,j.id].join('|');
+          const rec = {key,contest:b.contest,round:b.round,contestantId:en.contestantId,judgeId:j.id,s:sc,total,updatedAt:new Date().toISOString()};
+          const i = s.scores.findIndex(x=>x.key===key); if (i>=0) s.scores[i]=rec; else s.scores.push(rec);
+        });
+        break;
+      }
+      case 'setPopular': {
+        const pj = s.judgesFull.find(j => (j.contest||'noppamas') === 'noppamas');
+        if (!admin && !(pj && b.judgeId === pj.id)) throw new Error('เฉพาะ' + (pj ? pj.name : 'กรรมการนางนพมาศคนที่ 1') + ' เท่านั้นที่บันทึก Popular Vote ได้');
+        s.contestants.forEach(x => { if (x.contest !== 'noppamas') return;
+          if (Array.isArray(b.ids)) x.popular = b.ids.slice(0,1).includes(x.id);
+          if (b.votes && x.id in b.votes){ const v = b.votes[x.id]; x.votes = v === '' || v == null || isNaN(+v) ? null : Math.max(0, Math.floor(+v)); } });
         break;
       }
       default: {
         if (!admin) throw new Error('สิทธิ์ผู้ดูแลระบบไม่ถูกต้อง');
         if (b.action === 'saveContestant') {
           const c = {...b.contestant}; if (!c.id) c.id = 'c' + Date.now().toString(36) + Math.floor(Math.random()*1000);
-          const i = s.contestants.findIndex(x=>x.id===c.id); if (i>=0) s.contestants[i]=c; else s.contestants.push(c);
+          const i = s.contestants.findIndex(x=>x.id===c.id); if (i>=0) s.contestants[i]={...s.contestants[i], ...c, popular:s.contestants[i].popular, votes:s.contestants[i].votes}; else s.contestants.push({...c, popular:false, votes:null});
         } else if (b.action === 'deleteContestant') {
           s.contestants = s.contestants.filter(x=>x.id!==b.id); s.scores = s.scores.filter(x=>x.contestantId!==b.id);
-        } else if (b.action === 'setPopular') {
-          s.contestants.forEach(x=>{ x.popular = x.contest==='noppamas' && b.ids.includes(x.id); });
+
         } else if (b.action === 'setJudges') {
           s.judgesFull = b.judges.map((j,i)=>({id:j.id||('j'+(i+1)),name:j.name||('กรรมการคนที่ '+(i+1)),pin:String(j.pin||''),contest:j.contest==='krathong'?'krathong':'noppamas'}));
         } else if (b.action === 'resetScores') {
@@ -654,14 +666,26 @@ function listFor(contest, round){
   if (contest === 'noppamas' && round === 'r2'){ const ids = finalistIds(); l = l.filter(c => ids.includes(c.id)); }
   return l.sort(roomSort);
 }
-/** ผู้เข้ารอบตัดสิน = 6 อันดับแรกจากคะแนนรวมรอบที่ 1 (ถ้าคะแนนเท่ากับอันดับที่ 6 จะเข้ารอบด้วย) */
-const FINALISTS = 6;
-function finalistIds(){
+/** ผู้เข้ารอบตัดสิน = 5 อันดับแรกจากคะแนนรอบที่ 1 + ผู้ได้ Popular Vote 1 คน = 6 คน
+    (คะแนนเท่ากับอันดับที่ 5 เข้ารอบด้วย · ถ้าผู้ได้ Popular Vote ติด 5 อันดับแรกอยู่แล้ว จะเลื่อนอันดับถัดไปขึ้นมาแทน) */
+const TOP_FINAL = 5, FINALISTS = 6;
+function topIds(n){
   const rk = ranking('noppamas','r1').filter(r => r.rank);
   if (!rk.length) return [];
-  const cut = rk[Math.min(FINALISTS, rk.length) - 1].rank;
+  const cut = rk[Math.min(n, rk.length) - 1].rank;
   return rk.filter(r => r.rank <= cut).map(r => r.c.id);
 }
+const popularWinner = () => STATE.contestants.find(c => c.contest === 'noppamas' && c.popular) || null;
+function finalistIds(){
+  const top = topIds(TOP_FINAL), pop = popularWinner();
+  if (!pop) return top;
+  if (!top.includes(pop.id)) return [...top, pop.id];
+  return topIds(FINALISTS);
+}
+/** ผู้เข้ารอบจาก Popular Vote (ไม่ติด 5 อันดับแรกจากคะแนน) */
+function popularFinalistId(){ const pop = popularWinner(); return pop && !topIds(TOP_FINAL).includes(pop.id) ? pop.id : null; }
+const popularJudge = () => judgesFor('noppamas')[0] || null;
+function canPopular(){ const s = getSess(); if (!s) return false; if (s.role === 'admin') return true; const pj = popularJudge(); return s.role === 'judge' && pj && s.judgeId === pj.id; }
 const judgesFor = (contest) => STATE.judges.filter(j => (j.contest || 'noppamas') === contest);
 const CONTEST_JUDGE = { noppamas: 'กรรมการนางนพมาศ', krathong: 'กรรมการตัดสินกระทง' };
 function scoreOf(contest, round, cid, jid){ return STATE.scores.find(s => s.contest===contest && s.round===round && s.contestantId===cid && s.judgeId===jid); }
@@ -888,19 +912,19 @@ function openLogin(role = 'judge', after, contest){
   const draw = (r) => {
     seg(document.getElementById('lgSeg'), [['judge','⚖️ กรรมการ'],['admin','🛡️ ผู้ดูแลระบบ']], r, draw);
     document.getElementById('lgForm').innerHTML = r === 'judge' ? `
-      <label class="l">ชื่อกรรมการ</label><select class="f" id="lgJ">${jopts || '<option value="">— ยังไม่มีกรรมการ —</option>'}</select>
-      <label class="l">รหัสกรรมการ (PIN)</label><input class="f" id="lgP" type="password" inputmode="numeric" placeholder="กรอกรหัส">
-      <button class="btn" style="width:100%;margin-top:16px" id="lgBtn">เข้าสู่ระบบให้คะแนน</button>` : `
+      <label class="l">เลือกชื่อกรรมการ</label><select class="f" id="lgJ">${jopts || '<option value="">— ยังไม่มีกรรมการ —</option>'}</select>
+      <p class="muted" style="font-size:13px;margin-top:8px">เลือกชื่อของท่าน แล้วกดปุ่มด้านล่างได้เลย (ไม่ต้องใช้รหัส)</p>
+      <button class="btn" style="width:100%;margin-top:12px" id="lgBtn">เข้าสู่ระบบให้คะแนน</button>` : `
       <label class="l">ชื่อผู้ใช้</label><input class="f" id="lgU" placeholder="admin" autocomplete="username">
       <label class="l">รหัสผ่าน</label><input class="f" id="lgP" type="password" placeholder="••••" autocomplete="current-password">
       <button class="btn" style="width:100%;margin-top:16px" id="lgBtn">เข้าสู่ระบบผู้ดูแล</button>`;
     const btn = document.getElementById('lgBtn');
     const submit = () => busy(btn, async () => {
       if (r === 'judge'){
-        const jid = document.getElementById('lgJ').value, pin = document.getElementById('lgP').value;
-        const res = await api('judgeLogin', { judgeId: jid, pin });
+        const jid = document.getElementById('lgJ').value; if (!jid) throw new Error('กรุณาเลือกชื่อกรรมการ');
+        const res = await api('judgeLogin', { judgeId: jid });
         const jc = res.judge.contest || 'noppamas';
-        setSess({ role:'judge', judgeId: jid, pin, name: res.judge.name, contest: jc });
+        setSess({ role:'judge', judgeId: jid, name: res.judge.name, contest: jc });
         toast('ยินดีต้อนรับ ' + res.judge.name);
         if (route() !== jc){ if (jc === 'noppamas') UI.nopMode = 'score'; else UI.ktMode = 'score'; go(jc); }
       } else {
@@ -913,7 +937,7 @@ function openLogin(role = 'judge', after, contest){
       closeModal(); const a = window._afterLogin; window._afterLogin = null; if (a) a(); render();
     });
     btn.onclick = submit;
-    document.getElementById('lgP').addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+    const pw = document.getElementById('lgP'); if (pw) pw.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
   };
   draw(role);
 }
@@ -967,30 +991,50 @@ function renderContest(contest){
   else renderScoring(contest, round, body);
   document.getElementById(pre+'Round').style.display = (UI[mk] === 'q' || UI[mk] === 'popular') ? 'none' : '';
 }
-const FINAL_NOTE = () => `ผู้เข้ารอบตัดสิน ${FINALISTS} คน คำนวณอัตโนมัติจากคะแนนรวมรอบที่ ๑ สูงสุด (คะแนนเท่ากับอันดับที่ ${FINALISTS} เข้ารอบด้วย)`;
+const FINAL_NOTE = () => `ผู้เข้ารอบตัดสิน ${FINALISTS} คน = คะแนนรอบที่ ๑ สูงสุด ${TOP_FINAL} อันดับ + ผู้ได้รางวัล Popular Vote 1 คน (คะแนนเท่ากับอันดับที่ ${TOP_FINAL} เข้ารอบด้วย · ถ้าผู้ได้ Popular Vote ติด ${TOP_FINAL} อันดับแรกอยู่แล้ว จะเลื่อนอันดับที่ ${FINALISTS} ขึ้นมาแทน)${popularWinner() ? '' : ' · ⏳ รอผล Popular Vote'}`;
 
-/* ---------- POPULAR VOTE (ติ๊กเลือกผู้ได้รางวัล) ---------- */
+/* ---------- POPULAR VOTE: กรรมการนางนพมาศคนที่ 1 ติ๊กผู้ได้รางวัล 1 คน + บันทึกคะแนนโหวต (ไม่บังคับ) ---------- */
 function renderPopular(body){
-  const s = getSess(); const admin = s && s.role === 'admin';
+  const can = canPopular(); const pj = popularJudge(); const s = getSess();
   const list = STATE.contestants.filter(c => c.contest === 'noppamas').sort(roomSort);
-  const winners = list.filter(c => c.popular);
+  const winner = popularWinner(); const hasVotes = list.some(c => c.votes != null);
+  const fromPop = popularFinalistId();
+  const who = pj ? esc(pj.name) : 'กรรมการนางนพมาศคนที่ 1';
   body.innerHTML = `<div class="panel orn">
     <div class="center"><div style="font-size:44px;animation:floatY 3s ease-in-out infinite">💖</div><b style="color:var(--lotus);font-size:22px;font-family:'Chonburi',serif;font-weight:400">รางวัล Popular Vote</b>
-    <p class="muted" style="font-size:14px;margin:4px 0 14px">${admin ? 'ติ๊ก ✓ ผู้ที่ได้รางวัล ระบบจะบันทึกให้ทันที (ไม่ต้องกรอกจำนวนโหวต)' : 'ผู้ดูแลระบบเป็นผู้ติ๊กเลือกผู้ได้รางวัล'}</p></div>
-    ${winners.length ? `<div class="center" style="margin-bottom:14px">${winners.map(w=>`<span class="pill" style="background:rgba(255,143,177,.2);color:var(--lotus);font-size:15px;padding:6px 14px;margin:3px">💖 ${esc(w.room)} ${esc(w.name)}</span>`).join('')}</div>` : ''}
-    <div class="grid2" style="grid-template-columns:repeat(auto-fill,minmax(230px,1fr))">${list.map(c => `
-      <label class="pvote ${c.popular?'on':''}" ${admin?'':'style="cursor:default"'}>
-        <input type="checkbox" class="chk pv" value="${esc(c.id)}" ${c.popular?'checked':''} ${admin?'':'disabled'}>
-        <span><b style="color:var(--gold)">${esc(c.room)}</b><br>${esc(c.name)}</span><span class="heart">${c.popular?'💖':'🤍'}</span></label>`).join('')}</div>
-    ${admin ? '' : `<div class="center" style="margin-top:14px"><button class="btn ghost sm" onclick="openLogin('admin')">🛡️ เข้าสู่ระบบผู้ดูแลเพื่อติ๊กเลือก</button></div>`}</div>`;
-  if (!admin) return;
+    <p class="muted" style="font-size:14px;margin:4px 0 4px">${can ? 'ติ๊ก ✓ ผู้ได้รางวัล 1 คน ระบบบันทึกทันที · กรอกคะแนนโหวตได้ถ้ามี (ไม่กรอกก็ได้)' : `ผู้บันทึก Popular Vote: <b style="color:var(--gold)">${who}</b> เท่านั้น`}</p>
+    <p style="font-size:13px;color:var(--gold);margin-bottom:14px">🎯 ผู้ได้รางวัล Popular Vote ได้เข้ารอบตัดสินด้วย (รวมกับ ${TOP_FINAL} อันดับแรกจากคะแนน = ${FINALISTS} คน)</p></div>
+    ${winner ? `<div class="center" style="margin-bottom:14px"><span class="pill" style="background:rgba(255,143,177,.2);color:var(--lotus);font-size:15px;padding:6px 14px;margin:3px">💖 ${esc(winner.room)} ${esc(winner.name)}${winner.votes!=null?` · ${winner.votes.toLocaleString('th-TH')} โหวต`:''}</span>
+      ${fromPop ? '<div class="muted" style="font-size:13px;margin-top:4px">✦ เข้ารอบตัดสินในฐานะผู้ได้ Popular Vote</div>' : finalistIds().includes(winner.id) ? '<div class="muted" style="font-size:13px;margin-top:4px">ติด 5 อันดับแรกจากคะแนนอยู่แล้ว ระบบเลื่อนอันดับที่ 6 ขึ้นมาแทน</div>' : ''}</div>` : ''}
+    <div class="grid2" style="grid-template-columns:repeat(auto-fill,minmax(240px,1fr))">${list.map(c => `
+      <div class="pvote ${c.popular?'on':''}" ${can?'':'style="cursor:default"'}>
+        <label style="display:flex;align-items:center;gap:10px;flex:1;cursor:${can?'pointer':'default'}"><input type="checkbox" class="chk pv" value="${esc(c.id)}" ${c.popular?'checked':''} ${can?'':'disabled'}>
+        <span><b style="color:var(--gold)">${esc(c.room)}</b><br>${esc(c.name)}</span></label>
+        ${can ? `<input class="f pvn" type="number" inputmode="numeric" min="0" step="1" data-id="${esc(c.id)}" value="${c.votes!=null?c.votes:''}" placeholder="โหวต" title="คะแนนโหวต (ไม่บังคับ)" style="width:84px;padding:6px 8px;text-align:center">`
+              : (hasVotes ? `<span class="muted" style="font-size:13px;white-space:nowrap">${c.votes!=null?c.votes.toLocaleString('th-TH')+' โหวต':'–'}</span>` : '')}
+        <span class="heart">${c.popular?'💖':'🤍'}</span></div>`).join('')}</div>
+    ${can ? `<div class="row" style="justify-content:center;margin-top:16px"><button class="btn" id="pvSave">💾 บันทึกคะแนนโหวต</button>${hasVotes?'<button class="btn ghost" id="pvTop">💖 ติ๊กผู้ได้โหวตสูงสุด</button>':''}</div>
+      <p class="muted center" style="font-size:12px;margin-top:6px">คะแนนโหวตไม่บังคับ · ช่องว่าง = ไม่บันทึก</p>`
+          : `<div class="center" style="margin-top:14px">${s && s.role==='judge' ? `<p class="muted" style="font-size:13px">ท่านเข้าสู่ระบบเป็น ${esc(s.name)}</p>` : `<button class="btn ghost sm" onclick="openLogin('judge',null,'noppamas')">🔑 เข้าสู่ระบบ ${who}</button>`}</div>`}</div>`;
+  if (!can) return;
   body.querySelectorAll('.pv').forEach(ch => ch.onchange = async () => {
-    const lab = ch.closest('.pvote'); lab.classList.toggle('on', ch.checked); lab.querySelector('.heart').textContent = ch.checked ? '💖' : '🤍';
-    if (ch.checked){ const r = lab.getBoundingClientRect(); miniBurst(r.left + r.width - 30, r.top + 20); }
-    const ids = [...body.querySelectorAll('.pv:checked')].map(x => x.value);
-    try { await api('setPopular', { ids }); toast(ch.checked ? '💖 บันทึกผู้ได้รางวัล Popular Vote แล้ว' : 'ยกเลิกการเลือกแล้ว'); }
-    catch(e){ toast(e.message, true); ch.checked = !ch.checked; lab.classList.toggle('on', ch.checked); }
+    const was = [...body.querySelectorAll('.pv')].filter(x => x !== ch && x.checked);
+    was.forEach(x => x.checked = false); // ผู้ได้รางวัลได้ 1 คน
+    const ids = ch.checked ? [ch.value] : [];
+    if (ch.checked){ const r = ch.closest('.pvote').getBoundingClientRect(); miniBurst(r.left + r.width - 30, r.top + 20); }
+    try { await api('setPopular', { ids, judgeId: s.judgeId }); toast(ch.checked ? '💖 บันทึกผู้ได้รางวัล Popular Vote แล้ว' : 'ยกเลิกการเลือกแล้ว'); }
+    catch(e){ toast(e.message, true); }
+    renderPopular(body);
   });
+  const readVotes = () => { const v = {}; body.querySelectorAll('.pvn').forEach(inp => { v[inp.dataset.id] = inp.value.trim() === '' ? '' : Math.max(0, Math.floor(+inp.value)); }); return v; };
+  document.getElementById('pvSave').onclick = (e) => busy(e.currentTarget, async () => {
+    if ([...body.querySelectorAll('.pvn')].some(i => i.value !== '' && (isNaN(+i.value) || +i.value < 0))) throw new Error('คะแนนโหวตต้องเป็นตัวเลขตั้งแต่ 0 ขึ้นไป');
+    await api('setPopular', { votes: readVotes(), judgeId: s.judgeId }); toast('บันทึกคะแนนโหวตแล้ว ✓'); renderPopular(body); });
+  const top = document.getElementById('pvTop');
+  if (top) top.onclick = (e) => { const v = readVotes(); const best = Object.entries(v).filter(([,n]) => n !== '').sort((a,b) => b[1]-a[1]);
+    if (!best.length) return toast('ยังไม่มีคะแนนโหวต', true);
+    if (best[1] && best[1][1] === best[0][1]) return toast('มีคะแนนโหวตสูงสุดเท่ากัน กรุณาติ๊กเลือกเอง', true);
+    busy(e.currentTarget, async () => { await api('setPopular', { ids: [best[0][0]], votes: v, judgeId: s.judgeId }); toast('💖 บันทึกผู้ได้โหวตสูงสุดแล้ว'); renderPopular(body); }); };
 }
 function critChips(contest, round){
   const R = CONTESTS[contest].rounds[round];
@@ -999,18 +1043,18 @@ function critChips(contest, round){
 function boardHTML(contest, round){
   const R = CONTESTS[contest].rounds[round]; const rows = ranking(contest, round); const J = judgesFor(contest);
   if (!rows.length) return `<div class="panel orn center"><p class="muted">${R.finalOnly ? 'ยังไม่มีผู้เข้ารอบตัดสิน — ' + FINAL_NOTE() + ' เมื่อกรรมการให้คะแนนรอบที่ ๑ แล้วรายชื่อจะแสดงที่นี่' : 'ยังไม่มีผู้เข้าประกวดในรายการนี้'}</p></div>`;
-  const items = itemsOf(contest, round);
-  const fin = contest === 'noppamas' && round === 'r1' ? finalistIds() : [];
+  const items = R.totalOnly ? [] : itemsOf(contest, round);
+  const fin = contest === 'noppamas' && round === 'r1' ? finalistIds() : [], popFin = contest === 'noppamas' ? popularFinalistId() : null;
   return `<div class="panel orn">
-   <div class="center" style="margin-bottom:10px"><b style="color:var(--gold2);font-size:18px">${esc(CONTESTS[contest].title)} · ${esc(R.full)}</b><div class="muted" style="font-size:13px">คะแนน = ค่าเฉลี่ยของ${CONTEST_JUDGE[contest]}ที่ให้คะแนนแล้ว · จัดอันดับอัตโนมัติ · อัปเดตทุก 10 วินาที</div>
+   <div class="center" style="margin-bottom:10px"><b style="color:var(--gold2);font-size:18px">${esc(CONTESTS[contest].title)} · ${esc(R.full)}</b><div class="muted" style="font-size:13px">คะแนน = ค่าเฉลี่ยคะแนนรวมของ${CONTEST_JUDGE[contest]}ที่บันทึกแล้ว · จัดอันดับอัตโนมัติ (มากไปน้อย) · อัปเดตทุก 10 วินาที</div>
    ${contest === 'noppamas' ? `<div style="font-size:13px;color:var(--lotus);margin-top:4px">🎯 ${FINAL_NOTE()}</div>` : ''}</div>
    ${critChips(contest, round)}
    <div class="tablewrap"><table class="t"><thead><tr><th>อันดับ</th><th>ห้อง</th><th class="left">${contest==='noppamas'?'ชื่อผู้เข้าประกวด':'รายการ'}</th>
    ${items.map(([n,m])=>`<th title="${esc(n)}" style="font-size:12px;white-space:normal;min-width:70px">${esc(n)}<br>(${m})</th>`).join('')}
    ${J.map(j=>`<th style="font-size:12px">${esc(j.name)}</th>`).join('')}<th>เฉลี่ย<br>(${R.total})</th></tr></thead><tbody>
    ${rows.map(r=>`<tr class="${r.rank&&r.rank<=3?'r'+r.rank:''}"><td>${r.rank?`<span class="medal ${r.rank<=3?'m'+r.rank:'mx'}">${r.rank}</span>`:'<span class="muted">–</span>'}</td>
-     <td><b>${esc(r.c.room)}</b></td><td class="left">${esc(r.c.name)}${fin.includes(r.c.id)?' <span class="pill gold">✦ เข้ารอบ</span>':''}${contest==='noppamas'&&r.c.popular?' <span class="pill" style="background:rgba(255,143,177,.2);color:var(--lotus)">💖 Popular</span>':''}<div class="bar"><i style="width:${(r.avg/R.total*100).toFixed(1)}%"></i></div></td>
-     ${r.critAvg.map(v=>`<td class="muted">${r.count?fmt(v):'–'}</td>`).join('')}
+     <td><b>${esc(r.c.room)}</b></td><td class="left">${esc(r.c.name)}${fin.includes(r.c.id)?(r.c.id===popFin?' <span class="pill gold">✦ เข้ารอบ (Popular Vote)</span>':' <span class="pill gold">✦ เข้ารอบ</span>'):''}${contest==='noppamas'&&r.c.popular?' <span class="pill" style="background:rgba(255,143,177,.2);color:var(--lotus)">💖 Popular</span>':''}<div class="bar"><i style="width:${(r.avg/R.total*100).toFixed(1)}%"></i></div></td>
+     ${(R.totalOnly?[]:r.critAvg).map(v=>`<td class="muted">${r.count?fmt(v):'–'}</td>`).join('')}
      ${r.per.map(s=>`<td>${s?fmt(s.total):'<span class="pill wait">รอ</span>'}</td>`).join('')}
      <td><b style="font-size:18px;color:var(--gold2)">${r.count?fmt(r.avg):'–'}</b><div class="muted" style="font-size:11px">${r.count}/${J.length} คน</div></td></tr>`).join('')}
    </tbody></table></div></div>`;
@@ -1064,7 +1108,7 @@ function renderScoring(contest, round, body){
   const s = getSess();
   if (!s || s.role !== 'judge'){
     body.innerHTML = `<div class="panel orn loginbox center"><svg viewBox="0 0 120 100" style="width:120px">${krathongSVG(45)}</svg>
-      <h3 class="sec" style="font-size:24px">สำหรับ${CONTEST_JUDGE[contest]}</h3><p class="muted" style="margin:6px 0 16px">กรุณาเข้าสู่ระบบด้วยรหัสกรรมการเพื่อให้คะแนน</p>
+      <h3 class="sec" style="font-size:24px">สำหรับ${CONTEST_JUDGE[contest]}</h3><p class="muted" style="margin:6px 0 16px">เลือกชื่อกรรมการเพื่อเริ่มให้คะแนน (ไม่ต้องใช้รหัส)</p>
       <button class="btn" onclick="openLogin('judge',null,'${contest}')">🔑 เข้าสู่ระบบ${CONTEST_JUDGE[contest]}</button>
       ${s && s.role==='admin' ? '<p class="muted" style="margin-top:12px;font-size:13px">(ผู้ดูแลระบบดูความคืบหน้าการให้คะแนนได้ที่เมนู ผู้ดูแลระบบ)</p>' : ''}</div>`;
     return;
@@ -1081,6 +1125,7 @@ function renderScoring(contest, round, body){
   const R = CONTESTS[contest].rounds[round]; const list = listFor(contest, round); const items = itemsOf(contest, round);
   const done = list.filter(c => scoreOf(contest, round, c.id, s.judgeId)).length;
   if (!list.length){ body.innerHTML = `<div class="panel orn center"><p class="muted">${R.finalOnly?'ยังไม่มีผู้เข้ารอบตัดสิน — ' + FINAL_NOTE():'ยังไม่มีผู้เข้าประกวด'}</p></div>`; return; }
+  if (R.totalOnly) return renderTotals(contest, round, body, s, list);
   body.innerHTML = `<div class="panel orn" style="margin-bottom:16px"><div class="row"><div><b style="color:var(--gold2)">⚖️ ${esc(s.name)}</b> · ${esc(CONTESTS[contest].title)} ${esc(R.full)}</div><span class="spacer"></span>
     <span class="pill ${done===list.length?'ok':'gold'}">ให้คะแนนแล้ว ${done}/${list.length}</span></div><div class="bar"><i style="width:${done/list.length*100}%"></i></div>
     ${R.finalOnly ? `<div class="muted" style="font-size:13px;margin-top:8px">🎯 ${FINAL_NOTE()}</div>` : ''}</div>
@@ -1102,12 +1147,53 @@ function renderScoring(contest, round, body){
       if (inputs.some(inp => inp.value === '')) return toast('กรุณากรอกคะแนนให้ครบทุกข้อ', true);
       if (inputs.some(inp => +inp.value > +inp.dataset.max || +inp.value < 0)) return toast('มีคะแนนเกินเกณฑ์ที่กำหนด', true);
       busy(e.currentTarget, async () => {
-        await api('saveScore', { judgeId: s.judgeId, pin: s.pin, contest, round, contestantId: card.dataset.cid, scores: inputs.map(i => +i.value) });
+        await api('saveScore', { judgeId: s.judgeId, contest, round, contestantId: card.dataset.cid, scores: inputs.map(i => +i.value) });
         dirty = false; toast('บันทึกคะแนนเรียบร้อย ✓'); const r = card.getBoundingClientRect(); miniBurst(r.left + r.width/2, r.top + 30);
         renderContest(contest);
       });
     };
   });
+}
+
+/* ---------- ประกวดกระทง: กรอกคะแนนรวมจากใบให้คะแนนกระดาษ แล้วระบบเรียงอันดับให้ ---------- */
+function renderTotals(contest, round, body, s, list){
+  const R = CONTESTS[contest].rounds[round];
+  const done = list.filter(c => scoreOf(contest, round, c.id, s.judgeId)).length;
+  body.innerHTML = `<div class="panel orn" style="margin-bottom:16px"><div class="row"><div><b style="color:var(--gold2)">⚖️ ${esc(s.name)}</b> · ${esc(CONTESTS[contest].title)} ${esc(R.full)}</div><span class="spacer"></span>
+    <span class="pill ${done===list.length?'ok':'gold'}">บันทึกแล้ว ${done}/${list.length}</span></div><div class="bar"><i style="width:${done/list.length*100}%"></i></div>
+    <div class="muted" style="font-size:13px;margin-top:8px">📝 รวมคะแนนจากใบให้คะแนน (กระดาษ) แล้วกรอก<b>คะแนนรวม</b>ของแต่ละห้อง (เต็ม ${R.total}) · กด Enter เพื่อไปช่องถัดไป · ระบบเรียงอันดับให้อัตโนมัติ</div></div>
+    ${critChips(contest, round)}
+    <div class="panel orn"><div class="tablewrap"><table class="t" style="min-width:0"><thead><tr><th>ห้อง</th><th class="left">ชื่อผลงาน</th><th>คะแนนรวม<br>(เต็ม ${R.total})</th><th>อันดับ<br><small class="muted">(จากที่กรอก)</small></th><th>สถานะ</th></tr></thead><tbody>
+    ${list.map(c => { const sc = scoreOf(contest, round, c.id, s.judgeId);
+      return `<tr data-cid="${esc(c.id)}"><td><b>${esc(c.room)}</b></td><td class="left">${esc(c.name)}</td>
+        <td><input class="f tin" type="number" inputmode="decimal" min="0" max="${R.total}" step="0.5" value="${sc?sc.total:''}" data-old="${sc?sc.total:''}" placeholder="0-${R.total}" style="width:110px;text-align:center;font-size:18px;font-weight:700"></td>
+        <td class="trk muted">–</td><td class="tst">${sc?'<span class="pill ok">✓ บันทึกแล้ว</span>':'<span class="pill wait">ยังไม่กรอก</span>'}</td></tr>`; }).join('')}
+    </tbody></table></div>
+    <div class="row" style="margin-top:14px"><span class="muted" style="font-size:13px" id="tInfo"></span><span class="spacer"></span><button class="btn" id="tSave">💾 บันทึกคะแนนทั้งหมด</button></div></div>`;
+  const rows = [...body.querySelectorAll('tr[data-cid]')], inputs = rows.map(r => r.querySelector('.tin'));
+  const upd = () => {
+    const vals = inputs.map(inp => inp.value === '' ? null : +inp.value);
+    const order = vals.map((v,i)=>[v,i]).filter(x=>x[0]!=null && !isNaN(x[0])).sort((a,b)=>b[0]-a[0]);
+    rows.forEach(r => r.querySelector('.trk').textContent = '–');
+    let rank = 0, prev = null; order.forEach(([v,i], k) => { if (prev === null || v !== prev) rank = k + 1; prev = v; const cell = rows[i].querySelector('.trk'); cell.innerHTML = rank <= 3 ? `<span class="medal m${rank}">${rank}</span>` : rank; });
+    inputs.forEach(inp => inp.classList.toggle('over', inp.value !== '' && (+inp.value > R.total || +inp.value < 0)));
+    const changed = inputs.filter(inp => inp.value !== inp.dataset.old).length;
+    document.getElementById('tInfo').textContent = changed ? `มีการแก้ไข ${changed} ห้อง ยังไม่บันทึก` : '';
+  };
+  inputs.forEach((inp, i) => { inp.addEventListener('input', () => { dirty = true; upd(); }); inp.addEventListener('keydown', e => { if (e.key === 'Enter'){ e.preventDefault(); (inputs[i+1] || document.getElementById('tSave')).focus(); } }); });
+  upd();
+  document.getElementById('tSave').onclick = (e) => {
+    const bad = inputs.find(inp => inp.value !== '' && (isNaN(+inp.value) || +inp.value > R.total || +inp.value < 0));
+    if (bad) { bad.focus(); return toast(`คะแนนรวมต้องอยู่ระหว่าง 0–${R.total}`, true); }
+    const entries = rows.map((r, i) => ({ contestantId: r.dataset.cid, total: inputs[i].value })).filter((x, i) => inputs[i].value !== '' && inputs[i].value !== inputs[i].dataset.old);
+    if (!entries.length) return toast('ไม่มีคะแนนที่เปลี่ยนแปลง');
+    const btn = e.currentTarget;
+    busy(btn, async () => {
+      await api('saveTotals', { judgeId: s.judgeId, contest, round, entries: entries.map(x => ({ ...x, total: +x.total })) });
+      dirty = false; toast(`บันทึกคะแนน ${entries.length} ห้องเรียบร้อย ✓`); const r = btn.getBoundingClientRect(); miniBurst(r.left + r.width/2, r.top);
+      renderContest(contest);
+    });
+  };
 }
 
 /* ---------- AWARDS ---------- */
@@ -1275,7 +1361,7 @@ function adminNop(pane){
     <p style="font-size:13px;color:var(--lotus);margin-bottom:10px">🎯 ${FINAL_NOTE()}</p>
     <div class="tablewrap"><table class="t"><thead><tr><th>ห้อง</th><th class="left">ชื่อ-นามสกุล</th><th>คะแนนรอบ ๑</th><th>อันดับ</th><th>สถานะ</th><th>จัดการ</th></tr></thead><tbody>
     ${list.map(c => { const r = rk.find(x=>x.c.id===c.id); return `<tr><td><b>${esc(c.room)}</b></td><td class="left">${esc(c.name)}${c.popular?' <span title="Popular Vote">💖</span>':''}</td><td>${r&&r.count?fmt(r.avg):'–'}</td><td>${r&&r.rank?r.rank:'–'}</td>
-      <td>${fin.includes(c.id)?'<span class="pill gold">✦ เข้ารอบตัดสิน</span>':'<span class="pill wait">–</span>'}</td>
+      <td>${fin.includes(c.id)?(c.id===popularFinalistId()?'<span class="pill gold">✦ เข้ารอบ (Popular Vote)</span>':'<span class="pill gold">✦ เข้ารอบตัดสิน</span>'):'<span class="pill wait">–</span>'}</td>
       <td style="white-space:nowrap"><button class="btn ghost sm" onclick='contestantForm(${JSON.stringify(c).replace(/'/g,"&#39;")})'>แก้ไข</button> <button class="btn danger sm" onclick="delContestant('${esc(c.id)}')">ลบ</button></td></tr>`; }).join('')}
     </tbody></table></div></div>`;
 }
@@ -1287,7 +1373,7 @@ function adminKt(pane){
     <button class="btn sm" onclick='contestantForm({contest:"krathong",level:"lower"})'>＋ เพิ่มห้องเรียน</button></div><div class="grid2">${tbl('lower','ระดับ ม.ต้น')}${tbl('upper','ระดับ ม.ปลาย')}</div></div>`;
 }
 function adminJudges(pane){
-  // ต้องมีข้อมูล PIN (เฉพาะผู้ดูแล) ก่อนแก้ไข — กัน PIN หายตอนบันทึก
+  // โหลดรายชื่อกรรมการฉบับเต็มก่อนแก้ไข
   if (!STATE.judgesFull){ pane.innerHTML = '<p class="center muted">⏳ กำลังโหลดข้อมูลกรรมการ...</p>'; api('adminLogin').then(() => { if (STATE.judgesFull) adminJudges(pane); }).catch(e => toast(e.message, true)); return; }
   const all = STATE.judgesFull.map(j=>({...j, contest: j.contest || 'noppamas'}));
   const js = { noppamas: all.filter(j=>j.contest==='noppamas'), krathong: all.filter(j=>j.contest==='krathong') };
@@ -1296,20 +1382,20 @@ function adminJudges(pane){
       <h3 class="center" style="color:var(--gold2);font-family:'Chonburi',serif;font-weight:400;font-size:22px">${CONTEST_JUDGE[c]}</h3>
       <p class="center muted" style="font-size:13px;margin-bottom:10px">ให้คะแนนได้เฉพาะ${esc(CONTESTS[c].title)}</p>
       <div class="row" style="justify-content:center"><span>จำนวน</span><input class="f jn" type="number" min="1" max="20" value="${js[c].length}" style="width:80px"><span>คน</span><button class="btn ghost sm jApply">ปรับจำนวน</button></div>
-      <div class="tablewrap" style="margin-top:12px"><table class="t" style="min-width:0"><thead><tr><th>#</th><th class="left">ชื่อกรรมการ</th><th>รหัส PIN</th></tr></thead><tbody>
-      ${js[c].map((j,i)=>`<tr><td>${i+1}</td><td><input class="f jname" value="${esc(j.name)}"></td><td><input class="f jpin" value="${esc(j.pin||'')}" style="max-width:110px"></td></tr>`).join('') || '<tr><td colspan="3" class="muted">ยังไม่มีกรรมการ</td></tr>'}</tbody></table></div></div>`;
+      <div class="tablewrap" style="margin-top:12px"><table class="t" style="min-width:0"><thead><tr><th>#</th><th class="left">ชื่อกรรมการ</th></tr></thead><tbody>
+      ${js[c].map((j,i)=>`<tr><td>${i+1}</td><td><input class="f jname" value="${esc(j.name)}">${c==='noppamas'&&i===0?'<div class="muted" style="font-size:12px;margin-top:4px">💖 คนที่ 1 เป็นผู้บันทึก Popular Vote</div>':''}</td></tr>`).join('') || '<tr><td colspan="2" class="muted">ยังไม่มีกรรมการ</td></tr>'}</tbody></table></div></div>`;
   const sync = () => ['noppamas','krathong'].forEach(c => { const p = pane.querySelector(`[data-c="${c}"]`);
-    p.querySelectorAll('.jname').forEach((el,i)=>js[c][i].name=el.value); p.querySelectorAll('.jpin').forEach((el,i)=>js[c][i].pin=el.value); });
+    p.querySelectorAll('.jname').forEach((el,i)=>js[c][i].name=el.value); });
   const draw = () => {
     pane.innerHTML = `<div class="grid2">${block('noppamas')}${block('krathong')}</div>
-      <p class="muted center" style="font-size:13px;margin-top:12px">กรรมการเข้าสู่ระบบด้วยชื่อ + PIN · กรรมการแต่ละชุดให้คะแนนได้เฉพาะรายการของตน · การลดจำนวนจะไม่นับคะแนนของกรรมการที่ถูกลบ</p>
+      <p class="muted center" style="font-size:13px;margin-top:12px">กรรมการเข้าสู่ระบบด้วยการเลือกชื่อ (ไม่ใช้รหัส) · กรรมการแต่ละชุดให้คะแนนได้เฉพาะรายการของตน · การลดจำนวนจะไม่นับคะแนนของกรรมการที่ถูกลบ</p>
       <div class="row" style="justify-content:center;margin-top:12px"><button class="btn" id="jSave">💾 บันทึกกรรมการทั้งหมด</button></div>`;
     pane.querySelectorAll('.jApply').forEach(btn => btn.onclick = () => { sync(); const p = btn.closest('[data-c]'), c = p.dataset.c;
       const n = Math.max(1, Math.min(20, +p.querySelector('.jn').value || 1)); const used = () => [...js.noppamas, ...js.krathong].map(j=>j.id);
-      while (js[c].length < n){ let k = 1; while (used().includes(PREFIX[c]+k)) k++; js[c].push({ id:PREFIX[c]+k, contest:c, name: CONTEST_JUDGE[c]+' คนที่ '+(js[c].length+1), pin: String(1000+Math.floor(Math.random()*9000)) }); }
+      while (js[c].length < n){ let k = 1; while (used().includes(PREFIX[c]+k)) k++; js[c].push({ id:PREFIX[c]+k, contest:c, name: CONTEST_JUDGE[c]+' คนที่ '+(js[c].length+1), pin: '' }); }
       js[c] = js[c].slice(0, n); draw(); });
     document.getElementById('jSave').onclick = (e) => { sync(); const list = [...js.noppamas, ...js.krathong];
-      if (list.some(j=>!String(j.pin).trim())) return toast('กรุณากำหนดรหัส PIN ให้ครบ', true);
+      if (list.some(j=>!String(j.name).trim())) return toast('กรุณากรอกชื่อกรรมการให้ครบ', true);
       busy(e.currentTarget, async () => { await api('setJudges', { judges: list }); toast('บันทึกกรรมการเรียบร้อย'); renderAdmin(); }); };
   };
   draw();
